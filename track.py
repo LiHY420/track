@@ -1,126 +1,168 @@
 import cv2
 import numpy as np
 import time
+import math
 
+initialPoint = None
+pointSelected = False
 
-# 自定义函数：手动实现 Otsu 阈值算法
+def my_distance(p1, p2):
+    return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+
+def show_img(frame, start, algorithm_name):
+    end = time.time()
+    ms_double = (end - start) * 1000
+    fps = 1000 / ms_double if ms_double > 0 else 0
+    print(f"it took {ms_double:.2f} ms")
+
+    # 在图像上显示 FPS 和算法名称
+    cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(frame, f"Algorithm: {algorithm_name}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+
+    cv2.namedWindow("result", 0)
+    cv2.resizeWindow("result", 640, 512)
+    cv2.imshow("result", frame)
+    cv2.waitKey(1)
+
+# 手动实现 Otsu 阈值算法，包含提前终止条件
 def otsu_threshold(src):
     histogram, _ = np.histogram(src, bins=256, range=(0, 256))
-    total = src.size
-    sumB = 0
-    wB = 0
-    sum1 = np.dot(np.arange(256), histogram)
+    total_pixels = src.size
+    sum_all = np.dot(np.arange(256), histogram)
 
-    max_var = 0
-    threshold = 0
+    weight_bg, sum_bg = 0, 0
+    max_variance, threshold = 0, 0
 
     for t in range(256):
-        wB += histogram[t]
-        if wB == 0:
+        weight_bg += histogram[t]
+        if weight_bg == 0:
             continue
-
-        wF = total - wB
-        if wF == 0:
+        weight_fg = total_pixels - weight_bg
+        if weight_fg == 0:
             break
 
-        sumB += t * histogram[t]
+        sum_bg += t * histogram[t]
+        mean_bg = sum_bg / weight_bg
+        mean_fg = (sum_all - sum_bg) / weight_fg
+        variance_between = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
 
-        mB = sumB / wB
-        mF = (sum1 - sumB) / wF
-
-        var_between = wB * wF * (mB - mF) ** 2
-
-        if var_between > max_var:
-            max_var = var_between
+        if variance_between > max_variance:
+            max_variance = variance_between
             threshold = t
 
+        # 提前终止条件
+        if weight_bg > total_pixels * 0.9975 or weight_fg > total_pixels * 0.9975:
+            break
+
+    print(f"Otsu threshold: {threshold}")
     return threshold
 
+# 鼠标事件回调函数：选择跟踪目标
+def on_mouse(event, x, y, flags, param):
+    global initialPoint, pointSelected
+    if event == cv2.EVENT_LBUTTONDOWN:
+        initialPoint = (x, y)
+        pointSelected = True
 
-# 打开视频文件
-video_path = 'C:/Users/12631/Downloads/J20240711fire/j190728.mp4'
-video = cv2.VideoCapture(video_path)
+def main():
+    video_path = r"D:/dolphin_dataset/lhy/output_video.avi"
+    video = cv2.VideoCapture(video_path)
 
-if not video.isOpened():
-    print("无法打开视频文件")
-    exit()
+    if not video.isOpened():
+        print(f"Failed to open video: {video_path}")
+        return -1
 
-frame_count = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-fps = video.get(cv2.CAP_PROP_FPS)
-
-output_file_path = "C:/Users/12631/Downloads/J20240711fire/2-j103500.txt"
-roi_file_path = "C:/Users/12631/Downloads/J20240711fire/roi2-j103500.txt"
-
-# 打开文件以保存质心和 ROI 数据
-with open(output_file_path, 'w') as output_file, open(roi_file_path, 'w') as roi_file:
+    frame_count = int(video.get(cv2.CAP_PROP_FRAME_COUNT))  # 获取帧数
+    FPS = video.get(cv2.CAP_PROP_FPS)  # 获取FPS
+    lightFlag = True
     num = 0
-    total_processing_time = 0
 
-    while True:
-        ret, frame = video.read()
-        if not ret:
-            break
+    cv2.namedWindow("00", 0)
+    cv2.resizeWindow("00", 640, 512)
 
-        # 显示原始图像
-        cv2.imshow("Original Frame", frame)
+    try:
+        for i in range(frame_count):
+            ret, frame = video.read()
+            if not ret:
+                print("Failed to read frame!")
+                break
 
-        # 转换为灰度图像并模糊处理
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_frame = cv2.GaussianBlur(gray_frame, (3, 3), 0)
+            cv2.imshow("00", frame)
 
-        # 腐蚀操作
-        kernel = np.ones((4, 4), np.uint8)
-        eroded_frame = cv2.erode(gray_frame, kernel)
+            # 转换为灰度图像并模糊处理
+            gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray_frame = cv2.bilateralFilter(gray_frame, 9, 75, 75)  # 双边滤波平滑火光边缘
 
-        # 记录处理开始时间
-        start_time = time.time()
+            # 腐蚀操作
+            b2 = np.ones((4, 4), np.uint8)
+            gray_frame = cv2.erode(gray_frame, b2)
 
-        # 提取 ROI 区域
-        roi_frame = eroded_frame[frame.shape[0] // 4:frame.shape[0] * 3 // 4,
-                    frame.shape[1] // 4:frame.shape[1] * 3 // 4]
+            start = time.time()
+            print(f"min= {num // 20 // 60}, sec= {num // 20 % 60}")
+            num += 1
 
-        # 计算 Scharr 梯度
-        scharr_x = cv2.Scharr(roi_frame, cv2.CV_16S, 1, 0)
-        scharr_y = cv2.Scharr(roi_frame, cv2.CV_16S, 0, 1)
-        scharr_abs_x = cv2.convertScaleAbs(scharr_x)
-        scharr_abs_y = cv2.convertScaleAbs(scharr_y)
+            if not lightFlag:
+                gray_frame = 255 - gray_frame
 
-        # 合并梯度图像
-        scharr_image = cv2.addWeighted(scharr_abs_x, 0.5, scharr_abs_y, 0.5, 0)
+            # 裁剪ROI区域
+            roi_frame = gray_frame[gray_frame.shape[0] // 6: 5 * gray_frame.shape[0] // 6,
+                                   gray_frame.shape[1] // 6: 5 * gray_frame.shape[1] // 6]
 
-        # 计算 Otsu 阈值
-        otsu_thresh = otsu_threshold(scharr_image)
-        _, binary_img = cv2.threshold(scharr_image, otsu_thresh, 255, cv2.THRESH_BINARY)
+            # 计算Scharr梯度
+            scharr_grad_x = cv2.Scharr(roi_frame, cv2.CV_16S, 1, 0)
+            scharr_grad_y = cv2.Scharr(roi_frame, cv2.CV_16S, 0, 1)
+            abs_grad_x = cv2.convertScaleAbs(scharr_grad_x)
+            abs_grad_y = cv2.convertScaleAbs(scharr_grad_y)
+            scharr_image = cv2.addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0)
 
-        # 计算二值化图像的质心
-        moments = cv2.moments(binary_img)
-        if moments["m00"] != 0:
-            center_x = int(moments["m10"] / moments["m00"])
-            center_y = int(moments["m01"] / moments["m00"])
-            cv2.rectangle(frame, (center_x - 30, center_y - 30), (center_x + 30, center_y + 30), (0, 0, 255), 2)
+            cv2.namedWindow("11", 0)
+            cv2.resizeWindow("11", 640, 512)
+            cv2.imshow("11", scharr_image)
 
-            # 写入质心和 ROI 数据
-            output_file.write(f"({center_x + frame.shape[1] // 4}, {center_y + frame.shape[0] // 4})\n")
-            roi_file.write(f"({center_x - 30 + frame.shape[1] // 4}, {center_y - 30 + frame.shape[0] // 4}), "
-                           f"({center_x + 30 + frame.shape[1] // 4}, {center_y + 30 + frame.shape[0] // 4})\n")
+            # 计算Otsu阈值并进行二值化处理
+            otsu_thresh = otsu_threshold(scharr_image)
+            _, binary_img = cv2.threshold(scharr_image, otsu_thresh, 255, cv2.THRESH_BINARY)
 
-        # 计算处理时间
-        end_time = time.time()
-        processing_time = (end_time - start_time) * 1000  # 转换为毫秒
-        total_processing_time += processing_time
+            cv2.namedWindow("binaryImg", 0)
+            cv2.resizeWindow("binaryImg", 640, 512)
+            cv2.imshow("binaryImg", binary_img)
 
-        print(f"Processing time: {processing_time:.2f} ms")
-        num += 1
+            # 使用连通域分析来忽略分散的连通域
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_img, connectivity=8)
+            min_area = 500  # 忽略面积小于500像素的连通域
 
-        # 显示处理后的图像
-        cv2.imshow("Processed Frame", frame)
+            # 仅保留较大的连通域
+            mask = np.zeros(binary_img.shape, dtype=np.uint8)
+            for label in range(1, num_labels):  # 从1开始，跳过背景
+                if stats[label, cv2.CC_STAT_AREA] >= min_area:
+                    mask[labels == label] = 255
 
-        if cv2.waitKey(1) & 0xFF == 27:  # ESC键退出
-            break
+            # 计算质心位置，使用新的掩码图像
+            y_indices, x_indices = np.where(mask > 0)
+            if len(x_indices) > 0:
+                weights = mask[y_indices, x_indices].astype(float)
+                total_weight = np.sum(weights)
+                total_weight_x = np.sum(x_indices * weights)
+                total_weight_y = np.sum(y_indices * weights)
 
-# 计算并显示平均帧率
-average_fps = num / (total_processing_time / 1000.0)
-print(f"Average FPS: {average_fps:.2f}")
+                # 计算加权平均位置
+                center_x = total_weight_x / total_weight + frame.shape[1] / 6
+                center_y = total_weight_y / total_weight + frame.shape[0] / 6
 
-video.release()
-cv2.destroyAllWindows()
+                cv2.rectangle(frame,
+                              (max(int(center_x - 30), 0), max(int(center_y - 30), 0)),
+                              (min(int(center_x + 30), frame.shape[1]), min(int(center_y + 30), frame.shape[0])),
+                              (0, 0, 255), 2)
+                print(f"全图质心位置：({center_x:.2f}, {center_y:.2f})")
+
+            # 显示效果图窗口
+            algorithm_name = "sot"
+            show_img(frame, start, algorithm_name)
+
+    finally:
+        # 确保在任何情况下都能释放资源
+        video.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
