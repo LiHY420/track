@@ -1,114 +1,105 @@
 import cv2
 import numpy as np
 import time
-import math
-
-initialPoint = None
-pointSelected = False
-
-def my_distance(p1, p2):
-    return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
 def show_img(frame, start, algorithm_name):
+    # 计算并显示处理时间和帧率
     end = time.time()
     ms_double = (end - start) * 1000
     fps = 1000 / ms_double if ms_double > 0 else 0
-    print(f"it took {ms_double:.2f} ms")
+    print(f"处理时间: {ms_double:.2f} 毫秒")
 
-    # 在图像上显示 FPS 和算法名称
+    # 显示FPS和算法名称
     cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-    cv2.putText(frame, f"Algorithm: {algorithm_name}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+    cv2.putText(frame, f"算法: {algorithm_name}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
 
-    cv2.namedWindow("result", 0)
-    cv2.resizeWindow("result", 640, 512)
     cv2.imshow("result", frame)
     cv2.waitKey(1)
 
-# 手动实现 Otsu 阈值算法
-def otsu_threshold(src):
-    histogram, _ = np.histogram(src, bins=256, range=(0, 256))
-    total_pixels = src.size
-    sum_all = np.dot(np.arange(256), histogram)
+def process_image(frame):
+    # 转换为灰度图像
+    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    weight_bg, sum_bg = 0, 0
-    max_variance, threshold = 0, 0
+    # 中心区域ROI裁剪
+    roi_frame = gray_frame[gray_frame.shape[0] // 4: 3 * gray_frame.shape[0] // 4,
+                           gray_frame.shape[1] // 4: 3 * gray_frame.shape[1] // 4]
 
-    for t in range(256):
-        weight_bg += histogram[t]
-        if weight_bg == 0:
-            continue
-        weight_fg = total_pixels - weight_bg
-        if weight_fg == 0:
-            break
-
-        sum_bg += t * histogram[t]
-        mean_bg = sum_bg / weight_bg
-        mean_fg = (sum_all - sum_bg) / weight_fg
-        variance_between = weight_bg * weight_fg * (mean_bg - mean_fg) ** 2
-
-        if variance_between > max_variance:
-            max_variance = variance_between
-            threshold = t
-
-    print(f"Otsu threshold: {threshold}")
-    return threshold
-
-def process_image(image):
-    # 转换为灰度图像并模糊处理
-    gray_frame = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray_frame = cv2.bilateralFilter(gray_frame, 9, 75, 75)  # 双边滤波平滑火光边缘
-
-    # 计算Scharr梯度
-    scharr_grad_x = cv2.Scharr(gray_frame, cv2.CV_16S, 1, 0)
-    scharr_grad_y = cv2.Scharr(gray_frame, cv2.CV_16S, 0, 1)
+    # 使用Scharr算子计算梯度图像
+    scharr_grad_x = cv2.Scharr(roi_frame, cv2.CV_16S, 1, 0)
+    scharr_grad_y = cv2.Scharr(roi_frame, cv2.CV_16S, 0, 1)
     abs_grad_x = cv2.convertScaleAbs(scharr_grad_x)
     abs_grad_y = cv2.convertScaleAbs(scharr_grad_y)
     scharr_image = cv2.addWeighted(abs_grad_x, 0.5, abs_grad_y, 0.5, 0)
 
-    # 计算Otsu阈值并进行二值化处理
-    otsu_thresh = otsu_threshold(scharr_image)
-    _, binary_img = cv2.threshold(scharr_image, otsu_thresh, 255, cv2.THRESH_BINARY)
+    # 自适应Otsu阈值
+    _, binary_img = cv2.threshold(scharr_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # 使用连通域分析
+    # 获取连通域
     num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_img, connectivity=8)
-    min_area = 500  # 忽略面积小于500像素的连通域
 
-    # 仅保留较大的连通域
-    mask = np.zeros(binary_img.shape, dtype=np.uint8)
-    for label in range(1, num_labels):  # 从1开始，跳过背景
-        if stats[label, cv2.CC_STAT_AREA] >= min_area:
-            mask[labels == label] = 255
+    # 过滤小连通域，保留面积大于指定阈值的区域
+    min_area = 1000  # 小区域过滤阈值
+    large_components = [(i, stats[i], centroids[i]) for i in range(1, num_labels) if stats[i][cv2.CC_STAT_AREA] > min_area]
 
-    # 计算质心位置
-    y_indices, x_indices = np.where(mask > 0)
-    if len(x_indices) > 0:
-        weights = mask[y_indices, x_indices].astype(float)
-        total_weight = np.sum(weights)
-        total_weight_x = np.sum(x_indices * weights)
-        total_weight_y = np.sum(y_indices * weights)
+    # 初始化质心变量
+    final_centroid = None
 
-        # 计算加权平均位置
-        center_x = total_weight_x / total_weight
-        center_y = total_weight_y / total_weight
+    # 检查是否存在覆盖目标的高亮大面积区域
+    for i, stat, centroid in large_components:
+        # 检查连通域是否为大面积高亮区域并覆盖目标
+        if stat[cv2.CC_STAT_WIDTH] > roi_frame.shape[1] * 0.5 or stat[cv2.CC_STAT_HEIGHT] > roi_frame.shape[0] * 0.5:
+            # 瘦身操作（腐蚀）以减小连通域面积
+            mask = (labels == i).astype(np.uint8) * 255
+            kernel = np.ones((5, 5), np.uint8)
+            eroded_mask = cv2.erode(mask, kernel)
 
-        return int(center_x), int(center_y)  # 返回质心坐标 (x, y)
+            # 重新计算瘦身后区域的质心
+            moments = cv2.moments(eroded_mask)
+            if moments["m00"] != 0:
+                center_x = int(moments["m10"] / moments["m00"]) + frame.shape[1] // 4
+                center_y = int(moments["m01"] / moments["m00"]) + frame.shape[0] // 4
+                final_centroid = (center_x, center_y)
+        else:
+            # 正常情况下使用计算得到的质心
+            center_x, center_y = int(centroid[0]) + frame.shape[1] // 4, int(centroid[1]) + frame.shape[0] // 4
+            final_centroid = (center_x, center_y)
 
-    return None  # 如果没有检测到对象，返回 None
+    return final_centroid
+
+def main():
+    video_path = r"D:\dolphin_dataset\处理后\原始的\track-train-1\video.mp4"
+    video = cv2.VideoCapture(video_path)
+
+    if not video.isOpened():
+        print(f"无法打开视频: {video_path}")
+        return -1
+
+    frame_count = int(video.get(cv2.CAP_PROP_FRAME_COUNT))  # 获取帧数
+
+    try:
+        for i in range(frame_count):
+            ret, frame = video.read()
+            if not ret:
+                print("读取视频帧失败！")
+                break
+
+            start = time.time()  # 开始计时
+
+            centroid = process_image(frame)  # 处理图像，获取质心坐标
+            if centroid:
+                x, y = centroid
+                cv2.rectangle(frame, (max(x - 30, 0), max(y - 30, 0)),
+                              (min(x + 30, frame.shape[1]), min(y + 30, frame.shape[0])),
+                              (0, 0, 255), 2)
+                print(f"质心位置：({x:.2f}, {y:.2f})")
+
+            # 显示效果图
+            show_img(frame, start, algorithm_name="sot")
+
+    finally:
+        # 确保在任何情况下都能释放资源
+        video.release()
+        cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    # 示例用法
-    image_path = r"I:\wll\images\15648.bmp"  # 替换为你的图像路径
-    image = cv2.imread(image_path)
-
-    if image is not None:
-        start = time.time()
-        centroid = process_image(image)
-        if centroid:
-            print(f"质心坐标: {centroid}")
-            # 在图像上绘制质心
-            cv2.circle(image, centroid, 10, (0, 255, 0), -1)  # 绘制绿色圆点
-            show_img(image, start, "Image Processing")
-        else:
-            print("没有检测到对象。")
-    else:
-        print("无法读取图像。")
+    main()
